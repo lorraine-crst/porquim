@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS lancamentos (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     ts         TEXT    NOT NULL,
     criado_em  TEXT    NOT NULL,
-    tipo       TEXT    NOT NULL CHECK (tipo IN ('gasto', 'receita')),
+    tipo       TEXT    NOT NULL CHECK (tipo IN ('gasto', 'receita', 'investimento')),
     valor      REAL    NOT NULL,
     categoria  TEXT    NOT NULL,
     descricao  TEXT    NOT NULL DEFAULT '',
