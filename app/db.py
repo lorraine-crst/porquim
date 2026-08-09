@@ -60,29 +60,29 @@ def inserir_lancamento(
         return cur.lastrowid
 
 
-def resumo_mensal(ano_mes: str) -> list[dict]:
+def resumo_mensal(ano_mes: str, formato: str = "%Y-%m") -> list[dict]:
     with _conn() as conn:
         linhas = conn.execute(
             """
             SELECT categoria, SUM(valor) AS total, COUNT(*) AS qtd
             FROM lancamentos
-            WHERE tipo = 'gasto' AND strftime('%Y-%m', ts) = ?
+            WHERE tipo = 'gasto' AND strftime(?, ts) = ?
             GROUP BY categoria
             ORDER BY total DESC
             """,
-            (ano_mes,),
+            (formato, ano_mes),
         ).fetchall()
     return [dict(linha) for linha in linhas]
 
 
-def total_mes(ano_mes: str, tipo: str = "gasto") -> float:
+def total_mes(ano_mes: str, tipo: str = "gasto", formato: str = "%Y-%m") -> float:
     with _conn() as conn:
         linha = conn.execute(
             """
             SELECT COALESCE(SUM(valor), 0) AS total
             FROM lancamentos
-            WHERE tipo = ? AND strftime('%Y-%m', ts) = ?
+            WHERE tipo = ? AND strftime(?, ts) = ?
             """,
-            (tipo, ano_mes),
+            (tipo, formato, ano_mes),
         ).fetchone()
     return float(linha["total"])
