@@ -6,7 +6,7 @@ import httpx
 from app.config import APP_SECRET, WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_TOKEN
 
 
-VERSAO_API = "v21.0"
+VERSAO_API = "v26.0"
 BASE_URL = f"https://graph.facebook.com/{VERSAO_API}"
 
 
