@@ -134,6 +134,59 @@ def marcar_mensagem(wamid: str) -> bool:
             return False
 
 
+def ultimo_lancamento(usuario: str) -> dict | None:
+    with _conn() as conn:
+        linha = conn.execute(
+            """
+            SELECT id, ts, tipo, valor, categoria, descricao
+            FROM lancamentos
+            WHERE usuario = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (usuario,),
+        ).fetchone()
+    return dict(linha) if linha else None
+
+
+def apagar_lancamento(lancamento_id: int, usuario: str) -> bool:
+    with _conn() as conn:
+        cur = conn.execute(
+            "DELETE FROM lancamentos WHERE id = ? AND usuario = ?",
+            (lancamento_id, usuario),
+        )
+        return cur.rowcount > 0
+
+
+def atualizar_lancamento(
+    lancamento_id: int,
+    usuario: str,
+    categoria: str | None = None,
+    valor: float | None = None,
+) -> bool:
+    campos = []
+    params = []
+
+    if categoria is not None:
+        campos.append("categoria = ?")
+        params.append(categoria)
+
+    if valor is not None:
+        campos.append("valor = ?")
+        params.append(valor)
+
+    if not campos:
+        return False
+
+    params += [lancamento_id, usuario]
+
+    with _conn() as conn:
+        cur = conn.execute(
+            f"UPDATE lancamentos SET {', '.join(campos)} WHERE id = ? AND usuario = ?",
+            params,
+        )
+        return cur.rowcount > 0
+
 def salvar_pendente(
     usuario: str, tipo: str, valor: float, descricao: str, ts: str | None, raw: str
 ) -> None:

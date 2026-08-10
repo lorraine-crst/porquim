@@ -1,5 +1,6 @@
 import base64
 import json
+import re
 import traceback
 from contextlib import asynccontextmanager
 from datetime import date
@@ -15,6 +16,16 @@ from app.db import (
     marcar_mensagem,
     salvar_pendente,
     total_mes,
+    apagar_lancamento,
+    atualizar_lancamento,
+    buscar_pendente,
+    init_db,
+    inserir_lancamento,
+    limpar_pendente,
+    marcar_mensagem,
+    salvar_pendente,
+    total_mes,
+    ultimo_lancamento,
 )
 from app.parser import CATEGORIAS_GASTO, interpretar, interpretar_imagem
 from app.summary import brl, texto_resumo, texto_resumo_semana
@@ -24,9 +35,16 @@ from app.whatsapp import assinatura_valida, baixar_midia, enviar_texto
 AJUDA = (
     'Manda um gasto assim: "mercado 130".\n'
     'Também entendo "recebi 3000 de salário" e "apliquei 500 no CDB".\n'
-    'Pergunte "resumo" para ver o mês, ou "resumo da semana".\n'
-    "Pode mandar foto de comprovante também."
+    "Pode mandar foto de comprovante também.\n\n"
+    'Pergunte "resumo" ou "resumo da semana".\n\n'
+    "Para corrigir o último lançamento:\n"
+    '"apagar" — apaga\n'
+    '"categoria transporte" — muda a categoria\n'
+    '"valor 50" — corrige o valor'
 )
+
+APAGAR = ("apagar", "apaga", "deletar", "deleta", "desfazer", "desfaz", "remover")
+MUDAR = ("categoria", "muda", "mudar", "troca", "trocar", "corrig", "era ")
 
 SO_TEXTO_E_IMAGEM = (
     "Por enquanto eu só entendo texto e imagem.\n"
@@ -143,6 +161,13 @@ def _processar_texto(numero: str, texto: str) -> None:
         enviar_texto(numero, _pergunta_categoria(pendente["valor"], pendente["descricao"]))
         return
 
+    edicao = _comando_edicao(numero, texto)
+    if edicao:
+        enviar_texto(numero, edicao)
+        return
+
+    lancamento = interpretar(texto)
+
     lancamento = interpretar(texto)
 
     if lancamento.tipo == "pergunta" or lancamento.valor is None:
@@ -194,3 +219,52 @@ def _responder_pergunta(texto: str, usuario: str) -> str:
         return f"Você gastou R$ {brl(total)} neste mês."
 
     return AJUDA
+
+def _valor_citado(texto: str) -> float | None:
+    achado = re.search(r"\d[\d.]*(?:,\d{1,2})?", texto)
+    if not achado:
+        return None
+    try:
+        return float(achado.group().replace(".", "").replace(",", "."))
+    except ValueError:
+        return None
+
+
+def _categoria_citada(texto: str) -> str | None:
+    for categoria in CATEGORIAS_GASTO:
+        if categoria in texto:
+            return categoria
+    return None
+
+
+def _comando_edicao(usuario: str, texto: str) -> str | None:
+    t = texto.strip().lower()
+
+    quer_apagar = any(p in t for p in APAGAR)
+    quer_mudar = any(p in t for p in MUDAR)
+    nova_categoria = _categoria_citada(t)
+
+    if not (quer_apagar or (quer_mudar and nova_categoria) or t.startswith("valor")):
+        return None
+
+    ultimo = ultimo_lancamento(usuario)
+    if not ultimo:
+        return "Não encontrei nenhum lançamento seu para alterar."
+
+    if quer_apagar:
+        apagar_lancamento(ultimo["id"], usuario)
+        return (
+            f"Apagado: {ROTULO[ultimo['tipo']]} de R$ {brl(ultimo['valor'])} "
+            f"em {ultimo['categoria']}."
+        )
+
+    if quer_mudar and nova_categoria:
+        atualizar_lancamento(ultimo["id"], usuario, categoria=nova_categoria)
+        return f"Categoria corrigida para {nova_categoria}: R$ {brl(ultimo['valor'])}."
+
+    novo_valor = _valor_citado(t)
+    if novo_valor is None:
+        return 'Não entendi o valor. Escreva assim: "valor 50".'
+
+    atualizar_lancamento(ultimo["id"], usuario, valor=novo_valor)
+    return f"Valor corrigido para R$ {brl(novo_valor)} em {ultimo['categoria']}."
