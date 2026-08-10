@@ -9,6 +9,7 @@ from app.config import ANTHROPIC_API_KEY
 
 
 MODELO = "claude-haiku-4-5-20251001"
+MODELO_VISAO = "claude-sonnet-5"
 
 CATEGORIAS = [
     "mercado",
@@ -25,6 +26,8 @@ CATEGORIAS = [
     "freelance",
     "outros",
 ]
+
+CATEGORIAS_GASTO = [c for c in CATEGORIAS if c not in ("salario", "freelance")]
 
 _cliente = Anthropic(api_key=ANTHROPIC_API_KEY)
 
@@ -92,5 +95,61 @@ def interpretar(texto: str) -> Lancamento:
 
     if lancamento.categoria is not None and lancamento.categoria not in CATEGORIAS:
         lancamento.categoria = "outros"
+
+    return lancamento
+
+
+def _system_prompt_imagem() -> str:
+    hoje = date.today().isoformat()
+    lista = ", ".join(CATEGORIAS_GASTO)
+    return f"""Você lê comprovantes, recibos e capturas de tela de aplicativos bancários e devolve JSON.
+
+Hoje é {hoje}.
+
+Responda sempre com um único objeto JSON, sem texto antes ou depois e sem crases.
+
+Formato:
+{{"tipo": "gasto"|"receita"|"investimento", "valor": number|null, "categoria": string|null, "descricao": string|null, "data": "YYYY-MM-DD"|null}}
+
+Regras:
+- valor: o valor da transação em reais, com ponto decimal. Se houver vários, use o valor principal da transação em destaque.
+- tipo: "gasto" para pagamentos, compras e transferências enviadas; "receita" para valores recebidos; "investimento" para aplicações.
+- categoria: escolha uma desta lista apenas se o estabelecimento ou a descrição deixarem claro: {lista}. Se for uma transferência para pessoa física, um nome próprio, ou qualquer coisa ambígua, devolva null.
+- descricao: o nome do estabelecimento ou do destinatário, curto.
+- data: a data da transação, se visível. Caso contrário, null.
+- Se não houver valor legível na imagem, devolva valor null."""
+
+
+def interpretar_imagem(imagem_b64: str, media_type: str) -> Lancamento:
+    resposta = _cliente.messages.create(
+        model=MODELO_VISAO,
+        max_tokens=300,
+        system=_system_prompt_imagem(),
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": media_type,
+                            "data": imagem_b64,
+                        },
+                    },
+                    {"type": "text", "text": "Extraia o lançamento deste comprovante."},
+                ],
+            }
+        ],
+    )
+
+    try:
+        bruto = next(b.text for b in resposta.content if b.type == "text")
+        lancamento = Lancamento(**json.loads(_sem_crases(bruto)))
+    except (StopIteration, json.JSONDecodeError, ValidationError, TypeError):
+        return Lancamento(tipo="gasto", descricao="comprovante")
+
+    if lancamento.categoria is not None and lancamento.categoria not in CATEGORIAS_GASTO:
+        lancamento.categoria = None
 
     return lancamento

@@ -35,3 +35,15 @@ def assinatura_valida(corpo_bruto: bytes, header: str | None) -> bool:
 
     esperado = hmac.new(APP_SECRET.encode(), corpo_bruto, hashlib.sha256).hexdigest()
     return hmac.compare_digest(esperado, header.removeprefix("sha256="))
+
+def baixar_midia(media_id: str) -> tuple[bytes, str]:
+    cabecalho = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
+
+    meta = httpx.get(f"{BASE_URL}/{media_id}", headers=cabecalho, timeout=15)
+    meta.raise_for_status()
+    info = meta.json()
+
+    arquivo = httpx.get(info["url"], headers=cabecalho, timeout=30)
+    arquivo.raise_for_status()
+
+    return arquivo.content, info.get("mime_type", "image/jpeg").split(";")[0]

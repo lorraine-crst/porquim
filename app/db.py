@@ -25,6 +25,16 @@ CREATE TABLE IF NOT EXISTS mensagens_vistas (
 );
 
 CREATE INDEX IF NOT EXISTS idx_lancamentos_ts ON lancamentos (ts);
+
+CREATE TABLE IF NOT EXISTS pendentes (
+    usuario    TEXT PRIMARY KEY,
+    tipo       TEXT NOT NULL,
+    valor      REAL NOT NULL,
+    descricao  TEXT NOT NULL DEFAULT '',
+    ts         TEXT,
+    raw        TEXT NOT NULL DEFAULT '',
+    criado_em  TEXT NOT NULL
+);
 """
 
 
@@ -122,3 +132,34 @@ def marcar_mensagem(wamid: str) -> bool:
             return True
         except sqlite3.IntegrityError:
             return False
+
+
+def salvar_pendente(
+    usuario: str, tipo: str, valor: float, descricao: str, ts: str | None, raw: str
+) -> None:
+    with _conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO pendentes (usuario, tipo, valor, descricao, ts, raw, criado_em)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(usuario) DO UPDATE SET
+                tipo=excluded.tipo, valor=excluded.valor, descricao=excluded.descricao,
+                ts=excluded.ts, raw=excluded.raw, criado_em=excluded.criado_em
+            """,
+            (usuario, tipo, valor, descricao, ts, raw,
+             datetime.now().isoformat(sep=" ", timespec="seconds")),
+        )
+
+
+def buscar_pendente(usuario: str) -> dict | None:
+    with _conn() as conn:
+        linha = conn.execute(
+            "SELECT tipo, valor, descricao, ts, raw FROM pendentes WHERE usuario = ?",
+            (usuario,),
+        ).fetchone()
+    return dict(linha) if linha else None
+
+
+def limpar_pendente(usuario: str) -> None:
+    with _conn() as conn:
+        conn.execute("DELETE FROM pendentes WHERE usuario = ?", (usuario,))

@@ -1,3 +1,4 @@
+import base64
 import json
 import traceback
 from contextlib import asynccontextmanager
@@ -6,16 +7,30 @@ from datetime import date
 from fastapi import BackgroundTasks, FastAPI, Request, Response
 
 from app.config import ALLOWED_NUMBERS, VERIFY_TOKEN
-from app.db import init_db, inserir_lancamento, marcar_mensagem, total_mes
-from app.parser import interpretar
+from app.db import (
+    buscar_pendente,
+    init_db,
+    inserir_lancamento,
+    limpar_pendente,
+    marcar_mensagem,
+    salvar_pendente,
+    total_mes,
+)
+from app.parser import CATEGORIAS_GASTO, interpretar, interpretar_imagem
 from app.summary import brl, texto_resumo, texto_resumo_semana
-from app.whatsapp import assinatura_valida, enviar_texto
+from app.whatsapp import assinatura_valida, baixar_midia, enviar_texto
 
 
 AJUDA = (
     'Manda um gasto assim: "mercado 130".\n'
     'Também entendo "recebi 3000 de salário" e "apliquei 500 no CDB".\n'
-    'Pergunte "resumo" para ver o mês, ou "resumo da semana".'
+    'Pergunte "resumo" para ver o mês, ou "resumo da semana".\n'
+    "Pode mandar foto de comprovante também."
+)
+
+SO_TEXTO_E_IMAGEM = (
+    "Por enquanto eu só entendo texto e imagem.\n"
+    'Reenvie como mensagem escrita (ex.: "mercado 130") ou mande a foto do comprovante.'
 )
 
 ROTULO = {"gasto": "Gasto", "receita": "Receita", "investimento": "Investimento"}
@@ -48,7 +63,7 @@ async def receber(request: Request, tarefas: BackgroundTasks):
     if not assinatura_valida(corpo, request.headers.get("X-Hub-Signature-256")):
         return Response(status_code=403)
 
-    for wamid, numero, texto in _mensagens(json.loads(corpo)):
+    for wamid, numero, kind, dado in _mensagens(json.loads(corpo)):
         if numero not in ALLOWED_NUMBERS:
             print(f"[ignorado] número fora da whitelist: {numero}")
             continue
@@ -57,7 +72,7 @@ async def receber(request: Request, tarefas: BackgroundTasks):
             print(f"[duplicada] já processada: {wamid}")
             continue
 
-        tarefas.add_task(processar, numero, texto)
+        tarefas.add_task(processar, numero, kind, dado)
 
     return {"status": "ok"}
 
@@ -66,36 +81,102 @@ def _mensagens(dados: dict):
     for entrada in dados.get("entry", []):
         for mudanca in entrada.get("changes", []):
             for msg in mudanca.get("value", {}).get("messages", []):
-                if msg.get("type") == "text":
-                    yield msg["id"], msg["from"], msg["text"]["body"]
+                tipo = msg.get("type")
+                if tipo == "text":
+                    yield msg["id"], msg["from"], "text", msg["text"]["body"]
+                elif tipo == "image":
+                    yield msg["id"], msg["from"], "image", msg["image"]["id"]
+                else:
+                    yield msg["id"], msg["from"], "outro", tipo
 
 
-def processar(numero: str, texto: str) -> None:
+def processar(numero: str, kind: str, dado: str) -> None:
     try:
-        lancamento = interpretar(texto)
-
-        if lancamento.tipo == "pergunta" or lancamento.valor is None:
-            enviar_texto(numero, _responder_pergunta(texto, numero))
-            return
-
-        categoria = lancamento.categoria or "outros"
-
-        inserir_lancamento(
-            tipo=lancamento.tipo,
-            valor=lancamento.valor,
-            categoria=categoria,
-            descricao=lancamento.descricao or "",
-            ts=lancamento.data.isoformat() if lancamento.data else None,
-            raw=texto,
-            usuario=numero,
-        )
-
-        enviar_texto(
-            numero,
-            f"{ROTULO[lancamento.tipo]} de R$ {brl(lancamento.valor)} em {categoria} registrado.",
-        )
+        if kind == "image":
+            _processar_imagem(numero, dado)
+        elif kind == "text":
+            _processar_texto(numero, dado)
+        else:
+            enviar_texto(numero, SO_TEXTO_E_IMAGEM)
     except Exception:
         traceback.print_exc()
+
+
+def _processar_imagem(numero: str, media_id: str) -> None:
+    conteudo, media_type = baixar_midia(media_id)
+    imagem_b64 = base64.standard_b64encode(conteudo).decode("utf-8")
+    lancamento = interpretar_imagem(imagem_b64, media_type)
+
+    if lancamento.valor is None:
+        enviar_texto(numero, "Não consegui ler um valor nessa imagem. Pode mandar por texto?")
+        return
+
+    ts = lancamento.data.isoformat() if lancamento.data else None
+    raw = f"[imagem] {lancamento.descricao or ''}".strip()
+
+    if lancamento.categoria:
+        _gravar(numero, lancamento.tipo, lancamento.valor, lancamento.categoria,
+                lancamento.descricao or "", ts, raw)
+        return
+
+    salvar_pendente(numero, lancamento.tipo, lancamento.valor,
+                    lancamento.descricao or "", ts, raw)
+    enviar_texto(numero, _pergunta_categoria(lancamento.valor, lancamento.descricao))
+
+
+def _processar_texto(numero: str, texto: str) -> None:
+    pendente = buscar_pendente(numero)
+
+    if pendente:
+        if texto.strip().lower() in ("cancelar", "cancela"):
+            limpar_pendente(numero)
+            enviar_texto(numero, "Lançamento cancelado.")
+            return
+
+        categoria = _categoria_escolhida(texto)
+        if categoria:
+            limpar_pendente(numero)
+            _gravar(numero, pendente["tipo"], pendente["valor"], categoria,
+                    pendente["descricao"], pendente["ts"], pendente["raw"])
+            return
+
+        enviar_texto(numero, _pergunta_categoria(pendente["valor"], pendente["descricao"]))
+        return
+
+    lancamento = interpretar(texto)
+
+    if lancamento.tipo == "pergunta" or lancamento.valor is None:
+        enviar_texto(numero, _responder_pergunta(texto, numero))
+        return
+
+    _gravar(numero, lancamento.tipo, lancamento.valor, lancamento.categoria or "outros",
+            lancamento.descricao or "",
+            lancamento.data.isoformat() if lancamento.data else None, texto)
+
+
+def _gravar(numero: str, tipo: str, valor: float, categoria: str,
+            descricao: str, ts: str | None, raw: str) -> None:
+    inserir_lancamento(
+        tipo=tipo, valor=valor, categoria=categoria, descricao=descricao,
+        ts=ts, raw=raw, usuario=numero,
+    )
+    enviar_texto(numero, f"{ROTULO[tipo]} de R$ {brl(valor)} em {categoria} registrado.")
+
+
+def _categoria_escolhida(texto: str) -> str | None:
+    t = texto.strip().lower()
+    if t.isdigit():
+        i = int(t) - 1
+        return CATEGORIAS_GASTO[i] if 0 <= i < len(CATEGORIAS_GASTO) else None
+    return t if t in CATEGORIAS_GASTO else None
+
+
+def _pergunta_categoria(valor: float, descricao: str | None) -> str:
+    alvo = f" ({descricao})" if descricao else ""
+    linhas = [f"Li R$ {brl(valor)}{alvo}, mas não identifiquei a categoria.", "", "Responda com o número:"]
+    linhas += [f"{i}) {c}" for i, c in enumerate(CATEGORIAS_GASTO, 1)]
+    linhas += ["", 'Ou "cancelar" para descartar.']
+    return "\n".join(linhas)
 
 
 def _responder_pergunta(texto: str, usuario: str) -> str:
