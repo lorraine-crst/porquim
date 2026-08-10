@@ -46,6 +46,8 @@ AJUDA = (
 APAGAR = ("apagar", "apaga", "deletar", "deleta", "desfazer", "desfaz", "remover")
 MUDAR = ("categoria", "muda", "mudar", "troca", "trocar", "corrig", "era ")
 
+ERRO = "Não consegui registrar agora. Tenta de novo em instantes."
+
 SO_TEXTO_E_IMAGEM = (
     "Por enquanto eu só entendo texto e imagem.\n"
     'Reenvie como mensagem escrita (ex.: "mercado 130") ou mande a foto do comprovante.'
@@ -117,7 +119,12 @@ def processar(numero: str, kind: str, dado: str) -> None:
         else:
             enviar_texto(numero, SO_TEXTO_E_IMAGEM)
     except Exception:
+        print(f"[erro] ao processar {kind} de {numero}: {str(dado)[:60]}")
         traceback.print_exc()
+        try:
+            enviar_texto(numero, ERRO)
+        except Exception:
+            traceback.print_exc()
 
 
 def _processar_imagem(numero: str, media_id: str) -> None:
